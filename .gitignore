@@ -1,0 +1,31 @@
+# ===== DB migrations / Flyway / Liquibase (ah-db-migrations) =====
+
+# Env & secrets (DB URLs, passwords)
+.env
+.env.*
+!.env.example
+flyway.conf
+flyway.user.conf
+*.local.conf
+
+# Flyway / tooling binaries & logs
+flyway/
+flyway-*/
+*.log
+
+# Local dump / backup artifacts
+*.dump
+*.sql.gz
+*.bak
+dumps/
+backups/
+
+# Node (if a tooling/scripts package is added)
+node_modules/
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
