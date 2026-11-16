@@ -10,6 +10,51 @@ Part of the **A&H Mass Rate-Quote Scalability PoC**:
 
 ---
 
+## Two ways to build the database
+
+| File(s) | What it is | When to use |
+|---|---|---|
+| [`schema.sql`](schema.sql) | **God schema** — the *entire current state* of the DB in one file | Bootstrap a fresh **local** database in one command; read it top-to-bottom to understand the whole model |
+| [`migrations/`](migrations) | **Change history** — ordered `V#__*.sql` diffs | Safely upgrade databases that already hold data (teammates, staging, each Azure shard) |
+
+> **Golden workflow:** every schema change is reflected in **`schema.sql`** (always = "now")
+> **and** captured as a new **`migrations/V#__*.sql`** script (the diff that gets you there).
+> `schema.sql` is a *snapshot*; `migrations/` is the *trail*. Keep both in sync.
+
+### One-command local bootstrap
+
+```bash
+# 1. start a throwaway PostgreSQL 16
+docker run -d --name ah-local-db -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=ah \
+    -p 5432:5432 postgres:16
+
+# 2. build the ENTIRE database (27 tables incl. partitions, 3 views, seed data)
+PGPASSWORD=pw psql -h localhost -p 5432 -U postgres -d ah -f schema.sql
+```
+
+`schema.sql` is **idempotent** on its seed data (`ON CONFLICT`), so re-running it never
+errors on duplicate keys. It is validated to apply cleanly against PostgreSQL 16.
+
+### What's inside `schema.sql` (9 sections)
+
+| # | Section | Tables | Scalability idea it demonstrates |
+|---|---|---|---|
+| 1 | Extensions | `pgcrypto` | `gen_random_uuid()` → shards mint their own IDs (no central sequence) |
+| 2 | Reference / rating | `plan`, `plan_benefit`, `rate_table`, `state_regulatory_rule` | Read-only, **Redis-cached**, copied to every shard; covering index `ix_rate_lookup` for sub-15 ms quotes |
+| 3 | Core | `shard_map`, `employer_group`, `census_member` | **Sharded by `employer_group_id`** — keeps a company's data together on one shard |
+| 4 | Quotes | `quote`, `quote_coverage` | Durable snapshot; live wizard state lives in Redis → **stateless app servers** |
+| 5 | Policies | `policy` (+ `policy_coverage`, `dependent`, `beneficiary`) | **RANGE-partitioned by `bound_at`**; children carry `policy_bound_at` for composite FKs |
+| 6 | Claims | `claim` | **RANGE-partitioned by `incurred_date`** → prune/archive old quarters cheaply |
+| 7 | User Management | `um_user`, `um_role`, `um_permission`, `um_role_permission`, `um_user_role`, audit tables | **RBAC** driven by Entra ID groups; **not sharded** (identity is cross-cutting) |
+| 8 | Read views | `vw_policy_history`, `vw_group_enrollment`, `vw_user_effective_permissions` | Heavy reads served from **replicas**, not the primary |
+| 9 | Seed data | — | Idempotent plans, NJ/TX rates, state rules, roles & permission matrix |
+
+> **One mental model:** *sharding* splits data **across servers** (by `employer_group_id`);
+> *partitioning* splits a big table **within one server** (by date); *caching* and *replicas*
+> keep reads off the write primary.
+
+---
+
 ## Database topology
 
 ![Sharded primaries + replica fan-out animation](docs/db-topology.svg)
@@ -204,6 +249,7 @@ All files validated end-to-end against **PostgreSQL 16** (schema applies cleanly
 partition routing, and the repeatable seed are all green).
 
 ```
+schema.sql                     -- GOD SCHEMA: full current state in one file (local bootstrap)
 migrations/
   V1__reference_rating.sql     -- plan, plan_benefit, rate_table, state_regulatory_rule (+ hot index)
   V2__core_groups_members.sql  -- shard_map, employer_group, census_member
